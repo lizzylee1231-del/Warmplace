@@ -20,6 +20,7 @@ app.add_middleware(
     allow_origins=[
         "http://127.0.0.1:4173",
         "http://localhost:4173",
+        "https://zippy-melomakarona-3760d8.netlify.app",
     ],
     allow_credentials=True,
     allow_methods=["*"],
