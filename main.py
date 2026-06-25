@@ -7,12 +7,24 @@ from typing import Optional
 import requests
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from supabase import create_client
 
 load_dotenv()
 
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://127.0.0.1:4173",
+        "http://localhost:4173",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 GLM_API_KEY = os.environ["GLM_API_KEY"]
 GLM_MODEL = os.environ.get("GLM_MODEL", "glm-4-plus")
@@ -103,6 +115,7 @@ def analyze(req: AnalyzeRequest):
 
 
 class SaveRecordRequest(BaseModel):
+    user_id: str
     mood_text: str
     emotion_tags: Optional[list[str]] = None
     intensity: int = Field(ge=1, le=5)
@@ -121,6 +134,7 @@ def save_record(req: SaveRecordRequest):
     final_tags = req.emotion_tags if req.emotion_tags else req.ai_observed_emotions
 
     insert_result = supabase.table("mood_records").insert({
+        "user_id": req.user_id,
         "mood_text": req.mood_text,
         "emotion_tags": final_tags,
         "intensity": req.intensity,
@@ -141,18 +155,21 @@ def save_record(req: SaveRecordRequest):
 
 
 @app.get("/api/records")
-def get_records(range: str = "7d"):
+def get_records(range: str = "7d", user_id: Optional[str] = None):
     days = int(range.replace("d", ""))
     since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
 
-    result = (
+    query = (
         supabase.table("mood_records")
         .select("*")
         .eq("is_deleted", False)
         .gte("created_at", since)
-        .order("created_at", desc=True)
-        .execute()
     )
+
+    if user_id:
+        query = query.eq("user_id", user_id)
+
+    result = query.order("created_at", desc=True).execute()
 
     records = result.data
     for r in records:
@@ -162,8 +179,8 @@ def get_records(range: str = "7d"):
 
 
 @app.get("/api/summary")
-def get_summary(range: str = "7d"):
-    records = get_records(range)
+def get_summary(range: str = "7d", user_id: Optional[str] = None):
+    records = get_records(range, user_id)
 
     if not records:
         return {
@@ -224,6 +241,7 @@ def get_summary(range: str = "7d"):
 
 
 class MomentRequest(BaseModel):
+    user_id: str
     happy_moment: str
     scene_category: Optional[str] = None
     record_id: Optional[str] = None
@@ -242,6 +260,7 @@ def save_moment(req: MomentRequest):
             supabase.table("mood_records")
             .update({"happy_moment": req.happy_moment})
             .eq("id", numeric_id)
+            .eq("user_id", req.user_id)
             .execute()
         )
         saved_row = result.data[0]
@@ -256,6 +275,7 @@ def save_moment(req: MomentRequest):
             supabase.table("mood_records")
             .insert(
                 {
+                    "user_id": req.user_id,
                     "mood_text": req.happy_moment,
                     "emotion_tags": ["开心"],
                     "intensity": 5,
