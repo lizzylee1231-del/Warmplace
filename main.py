@@ -198,8 +198,11 @@ def get_summary(range: str = "7d", user_id: Optional[str] = None):
             "range": range,
             "mood_trend": [],
             "top_emotions": [],
+            "top_emotion_counts": [],
             "top_scenes": [],
+            "top_scene_counts": [],
             "happy_moments": [],
+            "happy_moments_with_date": [],
             "growth_summary": "还没有足够的记录，多记录几次后我们会帮你看见变化。",
         }
 
@@ -221,12 +224,19 @@ def get_summary(range: str = "7d", user_id: Optional[str] = None):
         )
 
     all_tags = [tag for r in records for tag in (r["emotion_tags"] or [])]
-    top_emotions = [tag for tag, _ in Counter(all_tags).most_common(3)]
+    top_emotion_counts = Counter(all_tags).most_common(3)
+    top_emotions = [tag for tag, _ in top_emotion_counts]
 
     all_scenes = [r["scene_category"] for r in records if r["scene_category"]]
-    top_scenes = [scene for scene, _ in Counter(all_scenes).most_common(3)]
+    top_scene_counts = Counter(all_scenes).most_common(3)
+    top_scenes = [scene for scene, _ in top_scene_counts]
 
     happy_moments = [r["happy_moment"] for r in records if r["happy_moment"]][:3]
+    happy_moments_with_date = [
+        {"content": r["happy_moment"], "date": r["created_at"][:10]}
+        for r in records
+        if r["happy_moment"]
+    ][:3]
 
     growth_summary = call_glm(
         [
@@ -253,8 +263,11 @@ def get_summary(range: str = "7d", user_id: Optional[str] = None):
         "range": range,
         "mood_trend": mood_trend,
         "top_emotions": top_emotions,
+        "top_emotion_counts": [{"label": tag, "count": count} for tag, count in top_emotion_counts],
         "top_scenes": top_scenes,
+        "top_scene_counts": [{"label": scene, "count": count} for scene, count in top_scene_counts],
         "happy_moments": happy_moments,
+        "happy_moments_with_date": happy_moments_with_date,
         "growth_summary": growth_summary,
     }
 
