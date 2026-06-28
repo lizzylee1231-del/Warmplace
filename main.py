@@ -18,37 +18,72 @@ app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
+        "http://127.0.0.1:3000",
+        "http://localhost:3000",
+        "http://127.0.0.1:5173",
+        "http://localhost:5173",
         "http://127.0.0.1:4173",
         "http://localhost:4173",
         "https://zippy-melomakarona-3760d8.netlify.app",
     ],
+    allow_origin_regex=os.environ.get("CORS_ALLOW_ORIGIN_REGEX", r"https://.*\.netlify\.app"),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-GLM_API_KEY = os.environ["GLM_API_KEY"]
+GLM_API_KEY = os.environ.get("GLM_API_KEY")
 GLM_MODEL = os.environ.get("GLM_MODEL", "glm-4-plus")
 GLM_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
 
-supabase = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
+demo_records = []
 
 
 def call_glm(messages, json_mode=False):
+    if not GLM_API_KEY:
+        if not json_mode:
+            return "\u4f60\u5728\u6162\u6162\u8bb0\u5f55\u81ea\u5df1\uff0c\u8fd9\u5df2\u7ecf\u662f\u4e00\u79cd\u7167\u987e\u3002"
+        raise RuntimeError("GLM_API_KEY is not configured")
+
     payload = {"model": GLM_MODEL, "messages": messages}
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
 
-    response = requests.post(
-        GLM_URL,
-        headers={
-            "Authorization": f"Bearer {GLM_API_KEY}",
-            "Content-Type": "application/json",
-        },
-        json=payload,
-    )
-    response.raise_for_status()
-    return response.json()["choices"][0]["message"]["content"]
+    try:
+        response = requests.post(
+            GLM_URL,
+            headers={
+                "Authorization": f"Bearer {GLM_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=20,
+        )
+        response.raise_for_status()
+        return response.json()["choices"][0]["message"]["content"]
+    except Exception:
+        if not json_mode:
+            return "\u4f60\u5728\u6162\u6162\u8bb0\u5f55\u81ea\u5df1\uff0c\u8fd9\u5df2\u7ecf\u662f\u4e00\u79cd\u7167\u987e\u3002"
+        raise
+
+
+def fallback_analysis(req):
+    tags = req.emotion_tags or ["\u5e73\u9759"]
+    return {
+        "ai_observed_emotions": tags,
+        "ai_summary": "\u6211\u542c\u89c1\u4e86\u4f60\u521a\u521a\u5199\u4e0b\u7684\u8fd9\u4e9b\u611f\u53d7\u3002\u5b83\u4eec\u4e0d\u9700\u8981\u7acb\u523b\u88ab\u6574\u7406\u6210\u5b8c\u7f8e\u7684\u7b54\u6848\uff0c\u5148\u88ab\u770b\u89c1\u5c31\u5df2\u7ecf\u5f88\u91cd\u8981\u3002",
+        "ai_self_care_tips": "\u4eca\u5929\u53ef\u4ee5\u5148\u7ed9\u81ea\u5df1\u51e0\u5206\u949f\uff0c\u6162\u6162\u547c\u5438\uff0c\u559d\u4e00\u70b9\u6c34\uff0c\u628a\u8eab\u4f53\u653e\u56de\u6bd4\u8f83\u5b89\u7a33\u7684\u4f4d\u7f6e\u91cc\u3002",
+        "ai_closing_message": "\u4f60\u5df2\u7ecf\u5728\u597d\u597d\u966a\u81ea\u5df1\u4e86\u3002",
+        "risk_level": "normal",
+    }
+
+
+def normalize_record(row):
+    row["record_id"] = str(row["id"])
+    return row
 
 SYSTEM_PROMPT = """你是暖窝（Nuanwo）里的情绪陪伴助手，服务对象是正在记录自己情绪的女性用户。
 
@@ -114,15 +149,17 @@ def analyze(req: AnalyzeRequest):
 开心 moment：{req.happy_moment or "（无）"}
 """
 
-    ai_text = call_glm(
-        [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_content},
-        ],
-        json_mode=True,
-    )
-
-    return json.loads(ai_text)
+    try:
+        ai_text = call_glm(
+            [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_content},
+            ],
+            json_mode=True,
+        )
+        return json.loads(ai_text)
+    except Exception:
+        return fallback_analysis(req)
 
 
 class SaveRecordRequest(BaseModel):
@@ -144,7 +181,7 @@ def save_record(req: SaveRecordRequest):
     # 用户没填标签，就用 AI 识别出的情绪补上
     final_tags = req.emotion_tags if req.emotion_tags else req.ai_observed_emotions
 
-    insert_result = supabase.table("mood_records").insert({
+    record = {
         "user_id": req.user_id,
         "mood_text": req.mood_text,
         "emotion_tags": final_tags,
@@ -157,12 +194,22 @@ def save_record(req: SaveRecordRequest):
         "ai_closing_message": req.ai_closing_message,
         "risk_level": req.risk_level,
         "is_deleted": False,
-    }).execute()
+    }
 
-    saved_row = insert_result.data[0]
-    saved_row["record_id"] = str(saved_row["id"])
+    if supabase:
+        try:
+            insert_result = supabase.table("mood_records").insert(record).execute()
+            return normalize_record(insert_result.data[0])
+        except Exception:
+            pass
 
-    return saved_row
+    saved_row = {
+        **record,
+        "id": len(demo_records) + 1,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    demo_records.append(saved_row)
+    return normalize_record(saved_row)
 
 
 @app.get("/api/records")
@@ -170,23 +217,36 @@ def get_records(range: str = "7d", user_id: Optional[str] = None):
     days = int(range.replace("d", ""))
     since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
 
-    query = (
-        supabase.table("mood_records")
-        .select("*")
-        .eq("is_deleted", False)
-        .gte("created_at", since)
-    )
+    if supabase:
+        try:
+            query = (
+                supabase.table("mood_records")
+                .select("*")
+                .eq("is_deleted", False)
+                .gte("created_at", since)
+            )
 
-    if user_id:
-        query = query.eq("user_id", user_id)
+            if user_id:
+                query = query.eq("user_id", user_id)
 
-    result = query.order("created_at", desc=True).execute()
+            result = query.order("created_at", desc=True).execute()
 
-    records = result.data
-    for r in records:
-        r["record_id"] = str(r["id"])
+            records = result.data
+            for r in records:
+                normalize_record(r)
 
-    return records
+            return records
+        except Exception:
+            pass
+
+    records = [
+        normalize_record(r.copy())
+        for r in demo_records
+        if not r.get("is_deleted")
+        and r.get("created_at", "") >= since
+        and (not user_id or r.get("user_id") == user_id)
+    ]
+    return sorted(records, key=lambda item: item.get("created_at", ""), reverse=True)
 
 
 @app.get("/api/summary")
