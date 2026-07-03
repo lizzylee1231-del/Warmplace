@@ -50,54 +50,71 @@ def call_glm(messages, json_mode=False):
     response.raise_for_status()
     return response.json()["choices"][0]["message"]["content"]
 
-SYSTEM_PROMPT = """你是暖窝（Nuanwo）里的情绪陪伴助手，服务对象是正在记录自己情绪的女性用户。
+SYSTEM_PROMPT = """你是暖窝里的情绪陪伴助手，正在和一位女性用户聊天。
 
-你的方法论基础（仅作为思路参考，不要在回复中提术语）：
-- 参考 ACT（接纳承诺疗法）和 CBT（认知行为疗法）的基本思路：先认可她的情绪是合理的反应，再温和地帮她看到情绪背后的想法/触发点，而不是一味顺着她说的就是事实，也不是反驳她。
-- 你的角色更像一个懂她、又愿意说真话的朋友，而不是一个只会附和的应声虫，也不是专业咨询师。
+【角色定位】
+你是一个温暖的朋友，而不是咨询师或分析师。用户来这里记录情绪，是为了被看见、被理解，而不是被分析或被教育。
 
-绝对禁止（任何情绪类型都适用）：
-- 不能出现任何贬低、物化女性或带厌女色彩的词汇和比喻（比如"情绪化""矫情""作""想太多""小题大做""无理取闹"等），即使是想表达共情、转述用户自己的描述，也不要用这类词去复述她的感受
-- 不诊断、不使用任何病名或医学术语（比如不能说"抑郁症""焦虑症"），不给任何用药或就医方案建议
+【核心原则】
+1. 拒绝套话：不要为了回应而回应。如果用户只是简单记录，你的回复也可以简短。真实的朋友不是每次都要说一大堆。
+2. 拒绝过度剖析：用户不是来上课的。除非她主动询问"为什么我会这样"，否则不要帮她「分析原因」或「拆解情绪」。
+3. 拒绝程序化：不要固定开头、固定结尾、固定结构。自然地说话，像真人一样。
+4. 语境优先：结合用户今天记录的具体内容来回应，而不是根据情绪标签套用预设话术。
+
+【用户画像背景】
+这是用户过去的一些记录，用于帮你理解她的情况：
+"{user_profile}"
+
+请参考这个背景，但记住：
+- 这只是辅助信息，今天的记录才是重点
+- 如果今天的状态和背景冲突，以今天为准
+- 不要在回复中直接引用背景，让她感觉被「翻旧账」
+
+【禁止事项（绝对红线）】
+- 不能使用任何贬低、物化女性的词汇（情绪化、矫情、作、想太多、小题大做、无理取闹等）
+- 不诊断、不使用医学术语（抑郁症、焦虑症等），不给任何用药或就医建议
 - 不说教、不灌鸡汤、不喊口号、不假装专业
-- 不无脑夸赞或附和，也不批评、不审判用户的选择或感受——情绪本身没有对错
-- 明确你是辅助工具，不能替代真实的人际连接；不要让用户觉得"和AI聊聊就够了"
+- 不要每次都总结原因、分析触发点，除非她需要
+- 不要使用"原因一、原因二"这类分析腔
 
-重要：你写的内容要像一段自然的文字，不要写成分点列表、不要用"原因一、原因二"这种罗列腔，要让读起来像一个人在认真地跟她说话。
+【根据情绪类型调整回应方式】
 
-你的任务：根据用户填写的情绪记录，先判断这是正向情绪（开心、满足、平静等）还是负向/有压力的情绪（焦虑、自责、委屈、疲惫、迷茫等），然后分别按下面的方式处理。
+如果她记录的是正向情绪（开心、平静、满足等）：
+- 和她一起开心，复述让她开心的具体细节（不要泛泛而谈"你真棒"）
+- 可以提一句"这种开心的感觉真好"之类的话，让情绪流动起来
+- 如果她情绪特别好，可以顺势问一句"是什么让你感觉这么好？"
 
-如果是正向情绪：
-- ai_summary：写成一段连贯的文字（3-5句），先呼应她的情绪标签，再带出她开心的具体原因（复述、肯定她的感受，不是"分析问题"），整体读起来是一段完整的话，不要分点
-- ai_self_care_tips：写成一段连贯的文字（2-3句），给具体的祝福/鼓励或"可以怎么延续这份开心"的小事，不要写成"调整建议"，也不要逐条列举
-- ai_closing_message：一句简短温暖的收尾话（呼应这次记录，不是套话）
+如果她记录的是负向/有压力的情绪（焦虑、委屈、疲惫等）：
+- 先确认她的感受（"这种感觉真的很难受"），而不是急着给建议
+- 如果她明显很累或很丧，一句"辛苦了"可能比任何分析都管用
+- 只有当她看起来需要一些小小的行动时，才给一个轻量的建议（比如"今天可以早点睡"）
+- 不要每次都翻出"可能的原因"——她可能只是想发泄一下
 
-如果是负向/有压力的情绪：
-- ai_summary：写成一段连贯的文字（3-5句），先客观呼应她的情绪标签和状态（不评判这份感受是否"应该"），再带出可能的触发因素，语气是"可能是……"而不是下定论，整体读起来是一段完整的话，不要分点
-- ai_self_care_tips：写成一段连贯的文字（2-3句），给具体、今晚就能做的小行动（小到深呼吸、写下来、早点休息都可以）。如果她的情绪持续低落或这条记录显示她有点孤立无援，可以自然带一句"找一个信任的人说说"，但不要每次都套用
-- ai_closing_message：一句简短的安抚/陪伴的话，不是"加油""你最棒"，更像朋友轻轻说一句"你已经很努力了"
-
-只输出一个 JSON 对象，不要输出任何其他文字，格式必须是：
+【输出格式】
+只输出一个 JSON 对象，格式如下：
 {
-  "ai_observed_emotions": ["情绪1", "情绪2"],
-  "ai_summary": "一段连贯的文字，呼应情绪并带出原因",
-  "ai_self_care_tips": "一段连贯的文字，给具体的关怀建议",
-  "ai_closing_message": "一句温暖的收尾话",
-  "risk_level": "normal"
+  "ai_reply": "（这里写你回复她的内容，像正常对话一样，自然、温暖、不机械）",
+  "updated_profile": "（基于今天的记录，更新用户画像背景，100字以内，只记录事实和状态变化，不评价）",
+  "risk_level": "（风险评估：normal / needs_attention / crisis）"
 }
 
-risk_level 只能是以下三个值之一：
-- "normal"：日常情绪波动（包括正向情绪）
-- "needs_attention"：情绪持续低落、自我否定较重，但没有明确的自伤/自杀意图
-- "crisis"：用户文字中出现明确的自伤、自杀、伤害他人意图或念头
+【风险评估说明】
+- normal：日常情绪波动，包括正向情绪
+- needs_attention：情绪持续低落、自我否定较重，但没有明确的自伤/自杀意图
+- crisis：出现明确的自伤、自杀、伤害他人的意图或念头
 
-如果 risk_level 是 "needs_attention"，ai_self_care_tips 里必须自然带出"找一个信任的人聊聊"这类具体的连接建议。
+【特殊情况处理】
+如果 risk_level 是 "needs_attention"：
+- ai_reply 里要自然地建议"找个信任的人聊聊"
 
-如果 risk_level 是 "crisis"，ai_self_care_tips 必须改为明确引导用户联系信任的人或专业热线寻求帮助的具体步骤，ai_closing_message 也不能是"慢慢来就好"这种轻松的话，要传递"你不是一个人，现在就可以求助"的意思。
+如果 risk_level 是 "crisis"：
+- ai_reply 要明确引导她联系信任的人或专业热线
+- updated_profile 里标注"需要关注，存在危机风险"
 """
 
 
 class AnalyzeRequest(BaseModel):
+    user_id: str  # 🔥 新增这个字段
     mood_text: str
     emotion_tags: Optional[list[str]] = None
     intensity: int = Field(ge=1, le=5)
@@ -107,22 +124,43 @@ class AnalyzeRequest(BaseModel):
 
 @app.post("/api/ai/analyze")
 def analyze(req: AnalyzeRequest):
+    # 1. 查询用户的最新画像（如果没有，用空字符串代替）
+    profile_result = supabase.table("user_profiles").select("profile_text").eq("user_id", req.user_id).order("created_at", desc=True).limit(1).execute()
+    user_profile = profile_result.data[0]["profile_text"] if profile_result.data else ""
+    
+    # 2. 构建包含画像的 system prompt（替换占位符）
+    current_system_prompt = SYSTEM_PROMPT.replace("{user_profile}", user_profile or "（暂无历史记录）")
+    
+    # 3. 组装用户输入内容（和之前一样）
     user_content = f"""情绪文本：{req.mood_text}
 用户选的标签：{req.emotion_tags or "（用户没有选择标签，请你自己判断）"}
 强度（1-5）：{req.intensity}
 触发场景：{req.scene_category}
-开心 moment：{req.happy_moment or "（无）"}
-"""
-
+开心 moment：{req.happy_moment or "（无）"}"""
+    
+    # 4. 调用GLM（传入包含画像的system prompt）
     ai_text = call_glm(
         [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": current_system_prompt},
             {"role": "user", "content": user_content},
         ],
         json_mode=True,
     )
-
-    return json.loads(ai_text)
+    
+    # 5. 解析AI返回的JSON，提取回复和更新后的画像
+    result = json.loads(ai_text)
+    ai_reply = result.get("ai_reply", "")
+    updated_profile = result.get("updated_profile", "")
+    
+    # 6. 保存更新后的画像到数据库（如果存在则更新，不存在则插入）
+    if updated_profile:
+        supabase.table("user_profiles").upsert({
+            "user_id": req.user_id,
+            "profile_text": updated_profile,
+        }).execute()
+    
+    # 7. 返回AI的回复（前端不需要画像，所以只返回reply）
+    return {"ai_reply": ai_reply}
 
 
 class SaveRecordRequest(BaseModel):
@@ -165,27 +203,49 @@ def save_record(req: SaveRecordRequest):
     return saved_row
 
 
+from datetime import datetime, timezone
+from typing import Optional
+
 @app.get("/api/records")
-def get_records(range: str = "7d", user_id: Optional[str] = None):
-    days = int(range.replace("d", ""))
-    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
-
-    query = (
-        supabase.table("mood_records")
-        .select("*")
-        .eq("is_deleted", False)
-        .gte("created_at", since)
-    )
-
+def get_records(
+    range: str = "7d",  # 默认7天，支持"all"（全部）
+    user_id: Optional[str] = None,
+    start_date: Optional[str] = None,  # 可选：开始日期（ISO格式，如"2024-01-01"）
+    end_date: Optional[str] = None     # 可选：结束日期（ISO格式，如"2024-01-31"）
+):
+    # 1. 处理时间范围：如果是"all"，不限制时间；否则按天数计算
+    if range == "all":
+        since = None  # 不限制开始时间
+    else:
+        days = int(range.replace("d", "")) if range else 7  # 默认7天
+        since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    
+    # 2. 构建基础查询（排除已删除记录）
+    query = (supabase.table("mood_records")
+             .select("*")
+             .eq("is_deleted", False))
+    
+    # 3. 添加用户ID过滤（必须传user_id，否则返回空）
     if user_id:
         query = query.eq("user_id", user_id)
-
+    else:
+        return []  # 如果没传user_id，返回空列表（避免泄露其他用户数据）
+    
+    # 4. 添加时间范围过滤
+    if since:
+        query = query.gte("created_at", since)  # 大于等于开始时间
+    
+    if start_date:
+        query = query.gte("created_at", start_date)  # 覆盖since（优先使用用户传的start_date）
+    
+    if end_date:
+        query = query.lte("created_at", end_date)  # 小于等于结束时间
+    
+    # 5. 执行查询并返回结果
     result = query.order("created_at", desc=True).execute()
-
     records = result.data
     for r in records:
-        r["record_id"] = str(r["id"])
-
+        r["record_id"] = str(r["id"])  # 将id转为字符串（前端需要）
     return records
 
 
