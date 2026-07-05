@@ -149,7 +149,9 @@ SYSTEM_PROMPT = """你是暖窝里的情绪陪伴助手，正在和一位女性�
 
 
 class AnalyzeRequest(BaseModel):
-    user_id: str  # 🔥 新增这个字段
+    model_config = {"populate_by_name": True}
+
+    user_id: str
     mood_text: str
     emotion_tags: Optional[list[str]] = None
     intensity: int = Field(ge=1, le=5)
@@ -159,42 +161,91 @@ class AnalyzeRequest(BaseModel):
 
 @app.post("/api/ai/analyze")
 def analyze(req: AnalyzeRequest):
+    # 0. 兜底：supabase 未配置时直接返回占位结果（避免 500）
+    if not supabase or not GLM_API_KEY:
+        return {
+            "ai_reply": "你刚刚写下的这些感受，本身就值得被看见。现在还在本地演示模式，等后端服务连上后，我会认真陪你聊聊。",
+            "ai_observed_emotions": req.emotion_tags or ["平静"],
+            "ai_summary": "我听到了你写下的这些。",
+            "ai_self_care_tips": "给自己几分钟，慢慢呼吸。",
+            "ai_closing_message": "你已经在好好陪着自己了。",
+            "risk_level": "normal",
+        }
+
     # 1. 查询用户的最新画像（如果没有，用空字符串代替）
-    profile_result = supabase.table("user_profiles").select("profile_text").eq("user_id", req.user_id).order("created_at", desc=True).limit(1).execute()
-    user_profile = profile_result.data[0]["profile_text"] if profile_result.data else ""
-    
+    try:
+        profile_result = (
+            supabase.table("user_profiles")
+            .select("profile_text")
+            .eq("user_id", req.user_id)
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        user_profile = profile_result.data[0]["profile_text"] if profile_result.data else ""
+    except Exception as exc:  # noqa: BLE001
+        print(f"[analyze] load profile error: {exc!r}")
+        user_profile = ""
+
     # 2. 构建包含画像的 system prompt（替换占位符）
-    current_system_prompt = SYSTEM_PROMPT.replace("{user_profile}", user_profile or "（暂无历史记录）")
-    
-    # 3. 组装用户输入内容（和之前一样）
+    current_system_prompt = SYSTEM_PROMPT.replace(
+        "{user_profile}", user_profile or "（暂无历史记录）"
+    )
+
+    # 3. 组装用户输入内容
     user_content = f"""情绪文本：{req.mood_text}
 用户选的标签：{req.emotion_tags or "（用户没有选择标签，请你自己判断）"}
 强度（1-5）：{req.intensity}
 触发场景：{req.scene_category}
 开心 moment：{req.happy_moment or "（无）"}"""
-    
-    # 4. 调用GLM（传入包含画像的system prompt）
-    ai_text = call_glm(
-        [
-            {"role": "system", "content": current_system_prompt},
-            {"role": "user", "content": user_content},
-        ],
-        json_mode=True,
-    )
-    
-    # 5. 解析AI返回的JSON，提取回复和更新后的画像
-    result = json.loads(ai_text)
+
+    # 4. 调用 GLM，失败时降级
+    try:
+        ai_text = call_glm(
+            [
+                {"role": "system", "content": current_system_prompt},
+                {"role": "user", "content": user_content},
+            ],
+            json_mode=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[analyze] glm error: {exc!r}")
+        return {
+            "ai_reply": "我刚刚想好好回应你，但网络开小差了。你写下的这些都已经被我看到。",
+            "ai_observed_emotions": req.emotion_tags or ["平静"],
+            "ai_summary": "我听到了你写下的这些。",
+            "ai_self_care_tips": "给自己几分钟，慢慢呼吸。",
+            "ai_closing_message": "你已经在好好陪着自己了。",
+            "risk_level": "normal",
+        }
+
+    # 5. 解析 AI 返回的 JSON
+    try:
+        result = json.loads(ai_text)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[analyze] json parse error: {exc!r}; raw={ai_text[:200]!r}")
+        return {
+            "ai_reply": "我刚刚想好好回应你，但表达时有点卡壳。",
+            "ai_observed_emotions": req.emotion_tags or ["平静"],
+            "ai_summary": "我听到了你写下的这些。",
+            "ai_self_care_tips": "给自己几分钟，慢慢呼吸。",
+            "ai_closing_message": "你已经在好好陪着自己了。",
+            "risk_level": "normal",
+        }
     ai_reply = result.get("ai_reply", "")
     updated_profile = result.get("updated_profile", "")
-    
-    # 6. 保存更新后的画像到数据库（如果存在则更新，不存在则插入）
+
+    # 6. 保存更新后的画像到数据库
     if updated_profile:
-        supabase.table("user_profiles").upsert({
-            "user_id": req.user_id,
-            "profile_text": updated_profile,
-        }).execute()
-    
-    # 7. 返回AI的回复（前端不需要画像，所以只返回reply）
+        try:
+            supabase.table("user_profiles").upsert({
+                "user_id": req.user_id,
+                "profile_text": updated_profile,
+            }).execute()
+        except Exception as exc:  # noqa: BLE001
+            print(f"[analyze] save profile error: {exc!r}")
+
+    # 7. 返回 AI 的回复
     return {"ai_reply": ai_reply}
 
 
