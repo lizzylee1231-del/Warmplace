@@ -222,15 +222,14 @@ def analyze(req: AnalyzeRequest):
         result = json.loads(ai_text)
     except Exception as exc:  # noqa: BLE001
         print(f"[analyze] json parse error: {exc!r}; raw={ai_text[:200]!r}")
-        return {
-            "ai_reply": "我刚刚想好好回应你，但表达时有点卡壳。",
-            "ai_observed_emotions": req.emotion_tags or ["平静"],
-            "ai_summary": "我听到了你写下的这些。",
-            "ai_self_care_tips": "给自己几分钟，慢慢呼吸。",
-            "ai_closing_message": "你已经在好好陪着自己了。",
-            "risk_level": "normal",
-        }
+        result = {}
+
     ai_reply = result.get("ai_reply", "")
+    ai_summary = result.get("ai_summary", "")
+    ai_self_care_tips = result.get("ai_self_care_tips", "")
+    ai_closing_message = result.get("ai_closing_message", "")
+    ai_observed_emotions = result.get("ai_observed_emotions", req.emotion_tags or [])
+    risk_level = result.get("risk_level", "normal")
     updated_profile = result.get("updated_profile", "")
 
     # 6. 保存更新后的画像到数据库
@@ -243,8 +242,15 @@ def analyze(req: AnalyzeRequest):
         except Exception as exc:  # noqa: BLE001
             print(f"[analyze] save profile error: {exc!r}")
 
-    # 7. 返回 AI 的回复
-    return {"ai_reply": ai_reply}
+    # 7. 返回 AI 的回复（前端需要全部 5 个字段用于渲染）
+    return {
+        "ai_reply": ai_reply,
+        "ai_summary": ai_summary,
+        "ai_self_care_tips": ai_self_care_tips,
+        "ai_closing_message": ai_closing_message,
+        "ai_observed_emotions": ai_observed_emotions,
+        "risk_level": risk_level,
+    }
 
 
 class SaveRecordRequest(BaseModel):
