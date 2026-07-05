@@ -149,8 +149,6 @@ SYSTEM_PROMPT = """你是暖窝里的情绪陪伴助手，正在和一位女性�
 
 
 class AnalyzeRequest(BaseModel):
-    model_config = {"populate_by_name": True}
-
     user_id: str
     mood_text: str
     emotion_tags: Optional[list[str]] = None
