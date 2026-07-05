@@ -248,6 +248,31 @@ def save_record(req: SaveRecordRequest):
     return normalize_record(saved_row)
 
 
+@app.get("/")
+def root():
+    return {
+        "service": "warmplace-backend",
+        "status": "ok",
+        "endpoints": [
+            "/api/ai/analyze",
+            "/api/records",
+            "/api/summary",
+            "/api/moments",
+            "/docs",
+        ],
+    }
+
+
+@app.get("/api/health")
+def health():
+    return {
+        "status": "ok",
+        "supabase_configured": bool(supabase),
+        "glm_configured": bool(GLM_API_KEY),
+        "cors_regex": os.environ.get("CORS_ALLOW_ORIGIN_REGEX", ""),
+    }
+
+
 @app.get("/api/records")
 def get_records(
     range: str = "7d",  # 默认7天，支持"all"（全部）
@@ -255,11 +280,22 @@ def get_records(
     start_date: Optional[str] = None,  # 可选：开始日期（ISO格式，如"2024-01-01"）
     end_date: Optional[str] = None     # 可选：结束日期（ISO格式，如"2024-01-31"）
 ):
+    # 兜底：supabase 未配置时，直接返回空（避免 500 暴露后端）
+    if not supabase:
+        return []
+
+    # 兜底：必须传 user_id，否则返回空（避免泄露其他用户数据）
+    if not user_id:
+        return []
+
     # 1. 处理时间范围：如果是"all"，不限制时间；否则按天数计算
     if range == "all":
         since = None  # 不限制开始时间
     else:
-        days = int(range.replace("d", "")) if range else 7  # 默认7天
+        try:
+            days = int(range.replace("d", "")) if range else 7  # 默认7天
+        except ValueError:
+            days = 7
         since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
 
     # 2. 构建基础查询（排除已删除记录）
@@ -267,11 +303,8 @@ def get_records(
              .select("*")
              .eq("is_deleted", False))
 
-    # 3. 添加用户ID过滤（必须传user_id，否则返回空）
-    if user_id:
-        query = query.eq("user_id", user_id)
-    else:
-        return []  # 如果没传user_id，返回空列表（避免泄露其他用户数据）
+    # 3. 添加用户ID过滤
+    query = query.eq("user_id", user_id)
 
     # 4. 添加时间范围过滤
     if since:
@@ -283,12 +316,17 @@ def get_records(
     if end_date:
         query = query.lte("created_at", end_date)  # 小于等于结束时间
 
-    # 5. 执行查询并返回结果
-    result = query.order("created_at", desc=True).execute()
-    records = result.data
-    for r in records:
-        r["record_id"] = str(r["id"])  # 将id转为字符串（前端需要）
-    return records
+    # 5. 执行查询并返回结果（带兜底）
+    try:
+        result = query.order("created_at", desc=True).execute()
+        records = result.data or []
+        for r in records:
+            r["record_id"] = str(r["id"])  # 将id转为字符串（前端需要）
+        return records
+    except Exception as exc:  # noqa: BLE001
+        # 表不存在/列不存在/RLS 拒绝等任何错误都降级返回空，避免 500
+        print(f"[get_records] supabase error: {exc!r}")
+        return []
 
 
 @app.get("/api/summary")
