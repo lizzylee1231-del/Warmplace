@@ -171,7 +171,6 @@ def analyze(req: AnalyzeRequest):
 用户选的标签：{req.emotion_tags or "（用户没有选择标签，请你自己判断）"}
 强度（1-5）：{req.intensity}
 触发场景：{req.scene_category}
-<<<<<<< HEAD
 开心 moment：{req.happy_moment or "（无）"}"""
     
     # 4. 调用GLM（传入包含画像的system prompt）
@@ -249,11 +248,7 @@ def save_record(req: SaveRecordRequest):
     return normalize_record(saved_row)
 
 
-from datetime import datetime, timezone
-from typing import Optional
-
 @app.get("/api/records")
-<<<<<<< HEAD
 def get_records(
     range: str = "7d",  # 默认7天，支持"all"（全部）
     user_id: Optional[str] = None,
@@ -266,70 +261,34 @@ def get_records(
     else:
         days = int(range.replace("d", "")) if range else 7  # 默认7天
         since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
-    
+
     # 2. 构建基础查询（排除已删除记录）
     query = (supabase.table("mood_records")
              .select("*")
              .eq("is_deleted", False))
-    
+
     # 3. 添加用户ID过滤（必须传user_id，否则返回空）
     if user_id:
         query = query.eq("user_id", user_id)
     else:
         return []  # 如果没传user_id，返回空列表（避免泄露其他用户数据）
-    
+
     # 4. 添加时间范围过滤
     if since:
         query = query.gte("created_at", since)  # 大于等于开始时间
-    
+
     if start_date:
         query = query.gte("created_at", start_date)  # 覆盖since（优先使用用户传的start_date）
-    
+
     if end_date:
         query = query.lte("created_at", end_date)  # 小于等于结束时间
-    
+
     # 5. 执行查询并返回结果
     result = query.order("created_at", desc=True).execute()
     records = result.data
     for r in records:
         r["record_id"] = str(r["id"])  # 将id转为字符串（前端需要）
     return records
-=======
-def get_records(range: str = "7d", user_id: Optional[str] = None):
-    days = int(range.replace("d", ""))
-    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
-
-    if supabase:
-        try:
-            query = (
-                supabase.table("mood_records")
-                .select("*")
-                .eq("is_deleted", False)
-                .gte("created_at", since)
-            )
-
-            if user_id:
-                query = query.eq("user_id", user_id)
-
-            result = query.order("created_at", desc=True).execute()
-
-            records = result.data
-            for r in records:
-                normalize_record(r)
-
-            return records
-        except Exception:
-            pass
-
-    records = [
-        normalize_record(r.copy())
-        for r in demo_records
-        if not r.get("is_deleted")
-        and r.get("created_at", "") >= since
-        and (not user_id or r.get("user_id") == user_id)
-    ]
-    return sorted(records, key=lambda item: item.get("created_at", ""), reverse=True)
->>>>>>> 5a1dd214389f4930ac470187a53162195a2a058a
 
 
 @app.get("/api/summary")
