@@ -34,10 +34,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-GLM_API_KEY = os.environ.get("GLM_API_KEY")
-GLM_MODEL = os.environ.get("GLM_MODEL", "glm-4-plus")
-GLM_TIMEOUT_SECONDS = float(os.environ.get("GLM_TIMEOUT_SECONDS", "60"))
-GLM_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
+DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash")
+DEEPSEEK_TIMEOUT_SECONDS = float(os.environ.get("DEEPSEEK_TIMEOUT_SECONDS", "60"))
+DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
@@ -45,14 +45,14 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABAS
 demo_records = []
 
 
-def call_glm(messages, json_mode=False):
-    if not GLM_API_KEY:
+def call_deepseek(messages, json_mode=False):
+    if not DEEPSEEK_API_KEY:
         if not json_mode:
             return "\u4f60\u5728\u6162\u6162\u8bb0\u5f55\u81ea\u5df1\uff0c\u8fd9\u5df2\u7ecf\u662f\u4e00\u79cd\u7167\u987e\u3002"
-        raise RuntimeError("GLM_API_KEY is not configured")
+        raise RuntimeError("DEEPSEEK_API_KEY is not configured")
 
     payload = {
-        "model": GLM_MODEL,
+        "model": DEEPSEEK_MODEL,
         "messages": messages,
         "thinking": {"type": "disabled"},
     }
@@ -61,17 +61,17 @@ def call_glm(messages, json_mode=False):
 
     try:
         response = requests.post(
-            GLM_URL,
+            DEEPSEEK_URL,
             headers={
-                "Authorization": f"Bearer {GLM_API_KEY}",
+                "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
                 "Content-Type": "application/json",
             },
             json=payload,
-            timeout=GLM_TIMEOUT_SECONDS,
+            timeout=DEEPSEEK_TIMEOUT_SECONDS,
         )
         if not response.ok:
             print(
-                f"[glm] upstream error: status={response.status_code}; "
+                f"[deepseek] upstream error: status={response.status_code}; "
                 f"body={response.text[:1000]!r}"
             )
         response.raise_for_status()
@@ -183,7 +183,7 @@ class AnalyzeRequest(BaseModel):
 @app.post("/api/ai/analyze")
 def analyze(req: AnalyzeRequest):
     # 0. 兜底：supabase 未配置时直接返回占位结果（避免 500）
-    if not supabase or not GLM_API_KEY:
+    if not supabase or not DEEPSEEK_API_KEY:
         return {
             "ai_reply": "你刚刚写下的这些感受，本身就值得被看见。现在还在本地演示模式，等后端服务连上后，我会认真陪你聊聊。",
             "ai_observed_emotions": req.emotion_tags or ["平静"],
@@ -220,9 +220,9 @@ def analyze(req: AnalyzeRequest):
 触发场景：{req.scene_category}
 开心 moment：{req.happy_moment or "（无）"}"""
 
-    # 4. 调用 GLM，失败时降级
+    # 4. 调用 DeepSeek，失败时降级
     try:
-        ai_text = call_glm(
+        ai_text = call_deepseek(
             [
                 {"role": "system", "content": current_system_prompt},
                 {"role": "user", "content": user_content},
@@ -230,7 +230,7 @@ def analyze(req: AnalyzeRequest):
             json_mode=True,
         )
     except Exception as exc:  # noqa: BLE001
-        print(f"[analyze] glm error: {exc!r}")
+        print(f"[analyze] deepseek error: {exc!r}")
         return {
             "ai_reply": "我刚刚想好好回应你，但网络开小差了。你写下的这些都已经被我看到。",
             "ai_observed_emotions": req.emotion_tags or ["平静"],
@@ -346,7 +346,7 @@ def health():
     return {
         "status": "ok",
         "supabase_configured": bool(supabase),
-        "glm_configured": bool(GLM_API_KEY),
+        "deepseek_configured": bool(DEEPSEEK_API_KEY),
         "cors_regex": os.environ.get("CORS_ALLOW_ORIGIN_REGEX", ""),
     }
 
@@ -456,7 +456,7 @@ def get_summary(range: str = "7d", user_id: Optional[str] = None):
         if r["happy_moment"]
     ][:3]
 
-    growth_summary = call_glm(
+    growth_summary = call_deepseek(
         [
             {
                 "role": "system",
