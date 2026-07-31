@@ -51,7 +51,11 @@ def call_glm(messages, json_mode=False):
             return "\u4f60\u5728\u6162\u6162\u8bb0\u5f55\u81ea\u5df1\uff0c\u8fd9\u5df2\u7ecf\u662f\u4e00\u79cd\u7167\u987e\u3002"
         raise RuntimeError("GLM_API_KEY is not configured")
 
-    payload = {"model": GLM_MODEL, "messages": messages}
+    payload = {
+        "model": GLM_MODEL,
+        "messages": messages,
+        "thinking": {"type": "disabled"},
+    }
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
 
