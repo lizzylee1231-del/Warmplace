@@ -64,6 +64,11 @@ def call_glm(messages, json_mode=False):
             json=payload,
             timeout=20,
         )
+        if not response.ok:
+            print(
+                f"[glm] upstream error: status={response.status_code}; "
+                f"body={response.text[:1000]!r}"
+            )
         response.raise_for_status()
         return response.json()["choices"][0]["message"]["content"]
     except Exception:
