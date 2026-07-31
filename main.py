@@ -36,6 +36,7 @@ app.add_middleware(
 
 GLM_API_KEY = os.environ.get("GLM_API_KEY")
 GLM_MODEL = os.environ.get("GLM_MODEL", "glm-4-plus")
+GLM_TIMEOUT_SECONDS = float(os.environ.get("GLM_TIMEOUT_SECONDS", "60"))
 GLM_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
@@ -62,7 +63,7 @@ def call_glm(messages, json_mode=False):
                 "Content-Type": "application/json",
             },
             json=payload,
-            timeout=20,
+            timeout=GLM_TIMEOUT_SECONDS,
         )
         if not response.ok:
             print(
