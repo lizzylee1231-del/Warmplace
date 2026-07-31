@@ -44,6 +44,67 @@ SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
 demo_records = []
 
+WEEKLY_LETTER_NAME_LIMIT = 30
+WEEKLY_LETTER_TEXT_LIMIT = 800
+WEEKLY_LETTER_SUMMARY_LIMIT = 300
+
+
+def clean_single_line(value: Optional[str], limit: int) -> str:
+    text = " ".join(str(value or "").split())
+    return text[:limit]
+
+
+def build_letter_greeting(user_name: Optional[str]) -> str:
+    safe_name = clean_single_line(user_name, WEEKLY_LETTER_NAME_LIMIT)
+    return f"亲爱的{safe_name or '你'}："
+
+
+def build_weekly_letter_context(records: list[dict]) -> dict:
+    all_tags = [tag for row in records for tag in (row.get("emotion_tags") or [])]
+    all_scenes = [
+        row.get("scene_category") for row in records if row.get("scene_category")
+    ]
+    top_emotions = [label for label, _ in Counter(all_tags).most_common(3)]
+    top_scenes = [label for label, _ in Counter(all_scenes).most_common(3)]
+    happy_moments = [
+        clean_single_line(row.get("happy_moment"), WEEKLY_LETTER_SUMMARY_LIMIT)
+        for row in records
+        if row.get("happy_moment")
+    ][:3]
+
+    record_lines = []
+    for row in reversed(records):
+        record_lines.append(
+            json.dumps(
+                {
+                    "date": str(row.get("created_at") or "")[:10],
+                    "mood_text": clean_single_line(
+                        row.get("mood_text"), WEEKLY_LETTER_TEXT_LIMIT
+                    ),
+                    "emotion_tags": row.get("emotion_tags") or [],
+                    "intensity": row.get("intensity"),
+                    "scene_category": clean_single_line(
+                        row.get("scene_category"), 100
+                    ),
+                    "happy_moment": clean_single_line(
+                        row.get("happy_moment"), WEEKLY_LETTER_SUMMARY_LIMIT
+                    ),
+                    "ai_summary": clean_single_line(
+                        row.get("ai_summary"), WEEKLY_LETTER_SUMMARY_LIMIT
+                    ),
+                },
+                ensure_ascii=False,
+            )
+        )
+
+    return {
+        "record_count": len(records),
+        "top_emotions": top_emotions,
+        "top_scenes": top_scenes,
+        "happy_moments": happy_moments,
+        "records_text": "\n".join(record_lines),
+    }
+
 
 def call_deepseek(messages, json_mode=False):
     if not DEEPSEEK_API_KEY:
@@ -168,6 +229,70 @@ SYSTEM_PROMPT = """你是暖窝里的情绪陪伴助手，正在和一位女性�
 如果risk_level是"crisis"：
 - ai_reply要明确引导她联系信任的人或专业热线
 - updated_profile里标注"需要关注，存在危机风险"
+"""
+
+WEEKLY_LETTER_PROMPT = """你是“暖窝”里一位熟悉用户、但尊重边界的朋友。
+
+现在，你要根据用户过去一周留下的情绪记录，写一封私人来信的正文。
+信件开头的“亲爱的 xxx：”会由系统添加，因此你只写正文，不要重复称呼，也不要添加标题。
+
+【这封信的目的】
+
+不是分析用户，不是总结数据，也不是评价她这一周做得好不好。
+
+你要像一个真正关心她的朋友：
+记得她提过的事情；
+感受到她这一周经历的起伏；
+挑出一两个让你在意的具体片段；
+告诉她，这些事情在你心里留下了什么感受，以及你想对她说什么。
+
+读完后，她应该感到“有人认真记得我经历过什么”，而不是“AI 把我的记录整理成了一份报告”。
+
+【写作方式】
+
+1. 从一个具体感受、事件或生活片段自然地开始。不要使用固定模板，每封信的开头应随本周内容变化。
+2. 可以提及一到两个原始记录里的具体细节。用朋友自然回想的方式带出来，不要逐条复述，不要按照日期汇报。
+3. 对用户的感受做出真实回应。你可以心疼、替她松一口气、为她高兴、觉得某件事很不容易，也可以对某个小细节产生联想。不要只把她说过的话换一种说法重复一遍。
+4. 如果这一周既有辛苦，也有开心的时刻，两边都要看见。不要用后来的开心抵消之前的难过，也不要把低落强行解释成成长。
+5. 可以表达陪伴和关心，但不要替她下结论。不要断言她已经走出来、变得更好、更坚强，除非原始记录明确支持。
+6. 结尾自然收住。可以留下一句关心、祝愿或陪伴，但不要喊口号，不要强行升华，不要固定使用“你已经做得很好了”“一切都会好起来”等套话。
+
+【严格禁止】
+
+- 不要说“我看了你的记录”“读你的记录时”“根据你的记录”
+- 不要说“从数据来看”“本周数据显示”“高频情绪是”
+- 不要说“你这周记录了几次”“情绪强度有所上升或下降”
+- 不要像老师批作业、咨询师写评估、医生下诊断或领导做复盘
+- 不要罗列统计数据、日期、标签数量或事件清单
+- 不要使用“首先、其次、最后”这样的报告结构
+- 不要分析人格、原生家庭、心理机制或行为动机
+- 不要编造记录中没有出现的人、事件、关系、变化或感受
+- 不要把所有经历包装成成长、礼物、意义或必经之路
+- 不要给医疗、诊断、用药建议
+- 不要使用贬低、物化女性或带有厌女色彩的表达
+- 不要添加标题、称呼、署名、Markdown 标题或项目符号
+
+【风险边界】
+
+如果记录里出现持续低落、自我否定或明显需要关注的状态，可以温和地建议她找一个信任的人说说，不要制造恐慌。
+如果出现明确的自伤、自杀或伤害他人的意图，要认真、直接地鼓励她立即联系身边可信任的人或专业支持，不要只用抒情文字带过风险。
+
+【篇幅与格式】
+
+- 约 300–500 个中文字符
+- 使用 3–5 个自然段
+- 只输出信件正文
+- 不输出 JSON
+- 不解释写作过程
+- 不重复系统添加的称呼
+
+【本周数据】
+
+周回顾统计：
+{weekly_summary}
+
+用户本周的原始记录：
+{weekly_records}
 """
 
 
@@ -335,6 +460,7 @@ def root():
             "/api/ai/analyze",
             "/api/records",
             "/api/summary",
+            "/api/weekly-letter",
             "/api/moments",
             "/docs",
         ],
@@ -488,6 +614,70 @@ def get_summary(range: str = "7d", user_id: Optional[str] = None):
         "happy_moments_with_date": happy_moments_with_date,
         "growth_summary": growth_summary,
     }
+
+
+def weekly_letter_response(
+    range_value: str, records: list[dict], greeting: str, body: str
+) -> dict:
+    return {
+        "range": range_value,
+        "record_count": len(records),
+        "letter": f"{greeting}\n\n{body.strip()}",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@app.get("/api/weekly-letter")
+def get_weekly_letter(
+    user_id: str,
+    user_name: Optional[str] = None,
+    range: str = "7d",
+):
+    records = get_records(range, user_id)
+    greeting = build_letter_greeting(user_name)
+
+    if not records:
+        return weekly_letter_response(
+            range,
+            records,
+            greeting,
+            "这一周还没有留下可以一起回望的片段。等你想写的时候，我们再慢慢聊。",
+        )
+
+    context = build_weekly_letter_context(records)
+    weekly_summary = json.dumps(
+        {
+            "record_count": context["record_count"],
+            "top_emotions": context["top_emotions"],
+            "top_scenes": context["top_scenes"],
+            "happy_moments": context["happy_moments"],
+        },
+        ensure_ascii=False,
+    )
+    prompt = (
+        WEEKLY_LETTER_PROMPT.replace("{weekly_summary}", weekly_summary)
+        .replace("{weekly_records}", context["records_text"])
+    )
+
+    try:
+        body = call_deepseek(
+            [
+                {
+                    "role": "system",
+                    "content": "你只写正文，并严格遵守用户消息里的私人来信写作规则。",
+                },
+                {"role": "user", "content": prompt},
+            ]
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[weekly-letter] deepseek error: {exc!r}")
+        body = (
+            "本来想写这封信，好好说说这一周与你有关的那些片段，"
+            "但此刻信纸像是被风轻轻翻乱了。"
+            "你留下的心情没有被忽略，等我整理好，再认真陪你聊聊。"
+        )
+
+    return weekly_letter_response(range, records, greeting, body)
 
 
 class MomentRequest(BaseModel):
