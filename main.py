@@ -25,6 +25,8 @@ app.add_middleware(
         "http://127.0.0.1:4173",
         "http://localhost:4173",
         "https://zippy-melomakarona-3760d8.netlify.app",
+        "https://warmnest.top",
+        "https://www.warmnest.top",
     ],
     allow_origin_regex=os.environ.get("CORS_ALLOW_ORIGIN_REGEX", r"https://.*\.netlify\.app"),
     allow_credentials=True,
