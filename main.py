@@ -1,19 +1,27 @@
 import os
 import json
+import logging
 from collections import Counter
-from datetime import datetime, timedelta, timezone
-from typing import Optional
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta, timezone
+from typing import Annotated, Literal, Optional
+from uuid import UUID
 
+import httpx
 import requests
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
-from supabase import create_client
+from fastapi.responses import JSONResponse, RedirectResponse
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from supabase import ClientOptions, create_client
+from supabase_auth.errors import AuthApiError
 
 load_dotenv()
 
-app = FastAPI()
+app = FastAPI(title="暖窝 API", version="1.1.0", docs_url="/api/docs", openapi_url="/api/openapi.json")
+logger = logging.getLogger("warmplace")
 
 app.add_middleware(
     CORSMiddleware,
@@ -28,7 +36,7 @@ app.add_middleware(
         "https://warmnest.top",
         "https://www.warmnest.top",
     ],
-    allow_origin_regex=os.environ.get("CORS_ALLOW_ORIGIN_REGEX", r"https://.*\.netlify\.app"),
+    allow_origin_regex=os.environ.get("CORS_ALLOW_ORIGIN_REGEX") or None,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -41,8 +49,71 @@ DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+SUPABASE_PUBLISHABLE_KEY = os.environ.get("SUPABASE_PUBLISHABLE_KEY")
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
-demo_records = []
+bearer = HTTPBearer(auto_error=False)
+
+
+@dataclass
+class UserContext:
+    user_id: str
+    db: object
+
+
+def require_user(credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer)):
+    if not credentials or credentials.scheme.lower() != "bearer":
+        raise HTTPException(401, "请先建立安全会话", headers={"WWW-Authenticate": "Bearer"})
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        raise HTTPException(503, "身份服务暂时不可用")
+    # Each request owns its client and token; never mutate a shared auth session.
+    with httpx.Client(timeout=10.0) as transport:
+        try:
+            client = create_client(
+                SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY or SUPABASE_KEY,
+                options=ClientOptions(persist_session=False, auto_refresh_token=False, httpx_client=transport),
+            )
+            user = client.auth.get_user(credentials.credentials).user
+            if not user or not user.id:
+                raise HTTPException(401, "会话无效，请重新打开页面")
+            client.postgrest.auth(credentials.credentials)
+        except HTTPException:
+            raise
+        except AuthApiError as exc:
+            status = 401 if exc.status in (400, 401, 403, 404, 422) else 503
+            raise HTTPException(status, "会话无效或已过期" if status == 401 else "身份服务暂时不可用") from None
+        except Exception:
+            logger.warning("auth_service_unavailable")
+            raise HTTPException(503, "身份服务暂时不可用") from None
+        yield UserContext(str(user.id), client)
+
+
+def owner_id(ctx, requested_id):
+    if requested_id is not None and requested_id != ctx.user_id:
+        raise HTTPException(403, "不能访问其他用户的数据")
+    return ctx.user_id
+
+
+def execute_db(query):
+    try:
+        return query.execute().data or []
+    except Exception:
+        logger.warning("database_operation_failed")
+        raise HTTPException(503, "数据服务暂时不可用，请稍后重试") from None
+
+
+def saved_record(rows):
+    if not rows:
+        raise HTTPException(503, "未能确认记录已保存，请稍后重试")
+    return normalize_record(rows[0])
+
+
+@app.middleware("http")
+async def private_response_headers(request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
 
 WEEKLY_LETTER_NAME_LIMIT = 30
 WEEKLY_LETTER_TEXT_LIMIT = 800
@@ -108,8 +179,6 @@ def build_weekly_letter_context(records: list[dict]) -> dict:
 
 def call_deepseek(messages, json_mode=False):
     if not DEEPSEEK_API_KEY:
-        if not json_mode:
-            return "\u4f60\u5728\u6162\u6162\u8bb0\u5f55\u81ea\u5df1\uff0c\u8fd9\u5df2\u7ecf\u662f\u4e00\u79cd\u7167\u987e\u3002"
         raise RuntimeError("DEEPSEEK_API_KEY is not configured")
 
     payload = {
@@ -130,27 +199,26 @@ def call_deepseek(messages, json_mode=False):
             json=payload,
             timeout=DEEPSEEK_TIMEOUT_SECONDS,
         )
-        if not response.ok:
-            print(
-                f"[deepseek] upstream error: status={response.status_code}; "
-                f"body={response.text[:1000]!r}"
-            )
         response.raise_for_status()
-        return response.json()["choices"][0]["message"]["content"]
+        content = response.json()["choices"][0]["message"]["content"]
+        if not isinstance(content, str) or not content.strip():
+            raise ValueError("Empty model output")
+        return content
     except Exception:
-        if not json_mode:
-            return "\u4f60\u5728\u6162\u6162\u8bb0\u5f55\u81ea\u5df1\uff0c\u8fd9\u5df2\u7ecf\u662f\u4e00\u79cd\u7167\u987e\u3002"
+        logger.warning("model_generation_failed")
         raise
 
 
 def fallback_analysis(req):
     tags = req.emotion_tags or ["\u5e73\u9759"]
     return {
+        "ai_reply": "回应暂时没有生成成功。你可以稍后重试；下面是通用的陪伴提示，并非对这条记录的分析。",
         "ai_observed_emotions": tags,
         "ai_summary": "\u6211\u542c\u89c1\u4e86\u4f60\u521a\u521a\u5199\u4e0b\u7684\u8fd9\u4e9b\u611f\u53d7\u3002\u5b83\u4eec\u4e0d\u9700\u8981\u7acb\u523b\u88ab\u6574\u7406\u6210\u5b8c\u7f8e\u7684\u7b54\u6848\uff0c\u5148\u88ab\u770b\u89c1\u5c31\u5df2\u7ecf\u5f88\u91cd\u8981\u3002",
         "ai_self_care_tips": "\u4eca\u5929\u53ef\u4ee5\u5148\u7ed9\u81ea\u5df1\u51e0\u5206\u949f\uff0c\u6162\u6162\u547c\u5438\uff0c\u559d\u4e00\u70b9\u6c34\uff0c\u628a\u8eab\u4f53\u653e\u56de\u6bd4\u8f83\u5b89\u7a33\u7684\u4f4d\u7f6e\u91cc\u3002",
         "ai_closing_message": "\u4f60\u5df2\u7ecf\u5728\u597d\u597d\u966a\u81ea\u5df1\u4e86\u3002",
-        "risk_level": "normal",
+        "risk_level": "unknown",
+        "generation_status": "fallback",
     }
 
 
@@ -296,159 +364,86 @@ WEEKLY_LETTER_PROMPT = """你是“暖窝”里一位熟悉用户、但尊重边
 """
 
 
+NonBlank = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=4000)]
+ShortText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]
+Tag = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=30)]
+RiskLevel = Literal["normal", "needs_attention", "crisis", "unknown"]
+
+
 class AnalyzeRequest(BaseModel):
-    user_id: str
-    mood_text: str
-    emotion_tags: Optional[list[str]] = None
+    user_id: Optional[str] = Field(default=None, max_length=100)
+    mood_text: NonBlank
+    emotion_tags: Optional[list[Tag]] = Field(default=None, max_length=20)
     intensity: int = Field(ge=1, le=5)
-    scene_category: str
-    happy_moment: Optional[str] = None
+    scene_category: ShortText
+    happy_moment: Optional[str] = Field(default=None, max_length=4000)
+
+
+class AIAnalysis(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    ai_reply: NonBlank
+    ai_summary: NonBlank
+    ai_self_care_tips: NonBlank
+    ai_closing_message: NonBlank
+    ai_observed_emotions: list[Tag] = Field(min_length=1, max_length=20)
+    risk_level: Literal["normal", "needs_attention", "crisis"]
+    updated_profile: str = Field(default="", max_length=1000)
 
 
 @app.post("/api/ai/analyze")
-def analyze(req: AnalyzeRequest):
-    # 0. 兜底：supabase 未配置时直接返回占位结果（避免 500）
-    if not supabase or not DEEPSEEK_API_KEY:
-        return {
-            "ai_reply": "你刚刚写下的这些感受，本身就值得被看见。现在还在本地演示模式，等后端服务连上后，我会认真陪你聊聊。",
-            "ai_observed_emotions": req.emotion_tags or ["平静"],
-            "ai_summary": "我听到了你写下的这些。",
-            "ai_self_care_tips": "给自己几分钟，慢慢呼吸。",
-            "ai_closing_message": "你已经在好好陪着自己了。",
-            "risk_level": "normal",
-        }
-
-    # 1. 查询用户的最新画像（如果没有，用空字符串代替）
+def analyze(req: AnalyzeRequest, ctx: UserContext = Depends(require_user)):
+    uid = owner_id(ctx, req.user_id)
+    if not DEEPSEEK_API_KEY:
+        return fallback_analysis(req)
+    # Profile failures must not turn an AI response into a fake record save.
+    profile_rows = execute_db(ctx.db.table("user_profiles").select("id,profile_text")
+                              .eq("user_id", uid).order("created_at", desc=True).limit(1))
+    user_profile = profile_rows[0]["profile_text"] if profile_rows else ""
+    prompt = SYSTEM_PROMPT.replace("{user_profile}", (user_profile or "（暂无历史记录）")[:1000])
+    content = f"情绪文本：{req.mood_text}\n用户选的标签：{req.emotion_tags or []}\n强度：{req.intensity}\n触发场景：{req.scene_category}\n开心 moment：{req.happy_moment or '（无）'}"
     try:
-        profile_result = (
-            supabase.table("user_profiles")
-            .select("profile_text")
-            .eq("user_id", req.user_id)
-            .order("created_at", desc=True)
-            .limit(1)
-            .execute()
-        )
-        user_profile = profile_result.data[0]["profile_text"] if profile_result.data else ""
-    except Exception as exc:  # noqa: BLE001
-        print(f"[analyze] load profile error: {exc!r}")
-        user_profile = ""
+        raw = call_deepseek([{"role": "system", "content": prompt}, {"role": "user", "content": content}], json_mode=True)
+        analysis = AIAnalysis.model_validate_json(raw)
+    except Exception:
+        logger.warning("analysis_fallback")
+        return fallback_analysis(req)
 
-    # 2. 构建包含画像的 system prompt（替换占位符）
-    current_system_prompt = SYSTEM_PROMPT.replace(
-        "{user_profile}", user_profile or "（暂无历史记录）"
-    )
-
-    # 3. 组装用户输入内容
-    user_content = f"""情绪文本：{req.mood_text}
-用户选的标签：{req.emotion_tags or "（用户没有选择标签，请你自己判断）"}
-强度（1-5）：{req.intensity}
-触发场景：{req.scene_category}
-开心 moment：{req.happy_moment or "（无）"}"""
-
-    # 4. 调用 DeepSeek，失败时降级
-    try:
-        ai_text = call_deepseek(
-            [
-                {"role": "system", "content": current_system_prompt},
-                {"role": "user", "content": user_content},
-            ],
-            json_mode=True,
-        )
-    except Exception as exc:  # noqa: BLE001
-        print(f"[analyze] deepseek error: {exc!r}")
-        return {
-            "ai_reply": "我刚刚想好好回应你，但网络开小差了。你写下的这些都已经被我看到。",
-            "ai_observed_emotions": req.emotion_tags or ["平静"],
-            "ai_summary": "我听到了你写下的这些。",
-            "ai_self_care_tips": "给自己几分钟，慢慢呼吸。",
-            "ai_closing_message": "你已经在好好陪着自己了。",
-            "risk_level": "normal",
-        }
-
-    # 5. 解析 AI 返回的 JSON
-    try:
-        result = json.loads(ai_text)
-    except Exception as exc:  # noqa: BLE001
-        print(f"[analyze] json parse error: {exc!r}; raw={ai_text[:200]!r}")
-        result = {}
-
-    ai_reply = result.get("ai_reply", "")
-    ai_summary = result.get("ai_summary", "")
-    ai_self_care_tips = result.get("ai_self_care_tips", "")
-    ai_closing_message = result.get("ai_closing_message", "")
-    ai_observed_emotions = result.get("ai_observed_emotions", req.emotion_tags or [])
-    risk_level = result.get("risk_level", "normal")
-    updated_profile = result.get("updated_profile", "")
-
-    # 6. 保存更新后的画像到数据库
-    if updated_profile:
+    profile_saved = False
+    if analysis.updated_profile.strip():
         try:
-            supabase.table("user_profiles").upsert({
-                "user_id": req.user_id,
-                "profile_text": updated_profile,
-            }).execute()
-        except Exception as exc:  # noqa: BLE001
-            print(f"[analyze] save profile error: {exc!r}")
-
-    # 7. 返回 AI 的回复（前端需要全部 5 个字段用于渲染）
-    return {
-        "ai_reply": ai_reply,
-        "ai_summary": ai_summary,
-        "ai_self_care_tips": ai_self_care_tips,
-        "ai_closing_message": ai_closing_message,
-        "ai_observed_emotions": ai_observed_emotions,
-        "risk_level": risk_level,
-    }
+            if profile_rows:
+                rows = execute_db(ctx.db.table("user_profiles").update({"profile_text": analysis.updated_profile})
+                                  .eq("id", profile_rows[0]["id"]).eq("user_id", uid))
+            else:
+                rows = execute_db(ctx.db.table("user_profiles").insert({"user_id": uid, "profile_text": analysis.updated_profile}))
+            profile_saved = bool(rows)
+        except HTTPException:
+            logger.warning("profile_save_failed")
+    return {**analysis.model_dump(exclude={"updated_profile"}), "generation_status": "generated", "profile_saved": profile_saved}
 
 
-class SaveRecordRequest(BaseModel):
-    user_id: str
-    mood_text: str
-    emotion_tags: Optional[list[str]] = None
-    intensity: int = Field(ge=1, le=5)
-    scene_category: str
-    happy_moment: Optional[str] = None
-    ai_observed_emotions: list[str]
-    ai_summary: str
-    ai_self_care_tips: str
-    ai_closing_message: str
-    risk_level: str
+class SaveRecordRequest(AnalyzeRequest):
+    client_request_id: Optional[UUID] = None
+    ai_observed_emotions: list[Tag] = Field(max_length=20)
+    ai_summary: str = Field(max_length=4000)
+    ai_self_care_tips: str = Field(max_length=4000)
+    ai_closing_message: str = Field(max_length=4000)
+    risk_level: RiskLevel
 
 
 @app.post("/api/records")
-def save_record(req: SaveRecordRequest):
-    # 用户没填标签，就用 AI 识别出的情绪补上
-    final_tags = req.emotion_tags if req.emotion_tags else req.ai_observed_emotions
-
-    record = {
-        "user_id": req.user_id,
-        "mood_text": req.mood_text,
-        "emotion_tags": final_tags,
-        "intensity": req.intensity,
-        "scene_category": req.scene_category,
-        "happy_moment": req.happy_moment,
-        "ai_observed_emotions": req.ai_observed_emotions,
-        "ai_summary": req.ai_summary,
-        "ai_self_care_tips": req.ai_self_care_tips,
-        "ai_closing_message": req.ai_closing_message,
-        "risk_level": req.risk_level,
-        "is_deleted": False,
-    }
-
-    if supabase:
-        try:
-            insert_result = supabase.table("mood_records").insert(record).execute()
-            return normalize_record(insert_result.data[0])
-        except Exception:
-            pass
-
-    saved_row = {
-        **record,
-        "id": len(demo_records) + 1,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }
-    demo_records.append(saved_row)
-    return normalize_record(saved_row)
+def save_record(req: SaveRecordRequest, ctx: UserContext = Depends(require_user)):
+    uid = owner_id(ctx, req.user_id)
+    record = req.model_dump(mode="json", exclude={"user_id", "client_request_id"})
+    record.update(user_id=uid, emotion_tags=req.emotion_tags or req.ai_observed_emotions, is_deleted=False)
+    if req.client_request_id:
+        key = str(req.client_request_id)
+        record["client_request_id"] = key
+        rows = execute_db(ctx.db.table("mood_records").upsert(record, on_conflict="user_id,client_request_id", ignore_duplicates=True))
+        if not rows:
+            rows = execute_db(ctx.db.table("mood_records").select("*").eq("user_id", uid).eq("client_request_id", key).limit(1))
+        return saved_record(rows)
+    return saved_record(execute_db(ctx.db.table("mood_records").insert(record)))
 
 
 @app.get("/")
@@ -462,80 +457,88 @@ def root():
             "/api/summary",
             "/api/weekly-letter",
             "/api/moments",
-            "/docs",
+            "/api/docs",
         ],
     }
+
+
+@app.get("/docs", include_in_schema=False)
+def legacy_docs():
+    return RedirectResponse("/api/docs")
 
 
 @app.get("/api/health")
 def health():
     return {
         "status": "ok",
+        "check": "liveness",
+        "dependency_check": "/api/ready",
         "supabase_configured": bool(supabase),
         "deepseek_configured": bool(DEEPSEEK_API_KEY),
         "cors_regex": os.environ.get("CORS_ALLOW_ORIGIN_REGEX", ""),
     }
 
 
-@app.get("/api/records")
-def get_records(
-    range: str = "7d",  # 默认7天，支持"all"（全部）
-    user_id: Optional[str] = None,
-    start_date: Optional[str] = None,  # 可选：开始日期（ISO格式，如"2024-01-01"）
-    end_date: Optional[str] = None     # 可选：结束日期（ISO格式，如"2024-01-31"）
-):
-    # 兜底：supabase 未配置时，直接返回空（避免 500 暴露后端）
-    if not supabase:
-        return []
-
-    # 兜底：必须传 user_id，否则返回空（避免泄露其他用户数据）
-    if not user_id:
-        return []
-
-    # 1. 处理时间范围：如果是"all"，不限制时间；否则按天数计算
-    if range == "all":
-        since = None  # 不限制开始时间
-    else:
+@app.get("/api/ready")
+def readiness():
+    database = "unavailable"
+    if supabase:
         try:
-            days = int(range.replace("d", "")) if range else 7  # 默认7天
-        except ValueError:
-            days = 7
-        since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+            supabase.table("mood_records").select("id").limit(1).execute()
+            database = "connected"
+        except Exception:
+            logger.warning("database_readiness_failed")
+    return JSONResponse(
+        {"status": "ready" if database == "connected" else "degraded", "database": database,
+         "ai": "configured_not_probed" if DEEPSEEK_API_KEY else "not_configured"},
+        status_code=200 if database == "connected" else 503,
+    )
 
-    # 2. 构建基础查询（排除已删除记录）
-    query = (supabase.table("mood_records")
-             .select("*")
-             .eq("is_deleted", False))
 
-    # 3. 添加用户ID过滤
-    query = query.eq("user_id", user_id)
+@app.get("/api/auth/config")
+def auth_config():
+    if not SUPABASE_URL or not SUPABASE_PUBLISHABLE_KEY or not SUPABASE_PUBLISHABLE_KEY.startswith("sb_publishable_"):
+        raise HTTPException(503, "安全会话尚未配置，请稍后再试")
+    return {"url": SUPABASE_URL, "publishable_key": SUPABASE_PUBLISHABLE_KEY}
 
-    # 4. 添加时间范围过滤
-    if since:
-        query = query.gte("created_at", since)  # 大于等于开始时间
 
-    if start_date:
-        query = query.gte("created_at", start_date)  # 覆盖since（优先使用用户传的start_date）
-
-    if end_date:
-        query = query.lte("created_at", end_date)  # 小于等于结束时间
-
-    # 5. 执行查询并返回结果（带兜底）
+def date_bounds(range_value, start_date, end_date):
     try:
-        result = query.order("created_at", desc=True).execute()
-        records = result.data or []
-        for r in records:
-            r["record_id"] = str(r["id"])  # 将id转为字符串（前端需要）
-        return records
-    except Exception as exc:  # noqa: BLE001
-        # 表不存在/列不存在/RLS 拒绝等任何错误都降级返回空，避免 500
-        print(f"[get_records] supabase error: {exc!r}")
-        return []
+        if range_value != "all":
+            if not range_value.endswith("d") or not range_value[:-1].isdigit():
+                raise ValueError()
+            days = int(range_value[:-1])
+            if not 1 <= days <= 366:
+                raise ValueError()
+        start = datetime.combine(date.fromisoformat(start_date), datetime.min.time(), timezone.utc) if start_date else None
+        end = datetime.combine(date.fromisoformat(end_date), datetime.min.time(), timezone.utc) + timedelta(days=1) if end_date else None
+        if start and end and start >= end:
+            raise ValueError()
+        if start is None and range_value != "all":
+            start = datetime.now(timezone.utc) - timedelta(days=days)
+        return start, end
+    except (ValueError, OverflowError, TypeError):
+        raise HTTPException(422, "日期无效；range 须为 1d–366d 或 all，开始日期不得晚于结束日期") from None
+
+
+@app.get("/api/records")
+def get_records(range: str = "7d", user_id: Optional[str] = None,
+                start_date: Optional[str] = None, end_date: Optional[str] = None,
+                ctx: UserContext = Depends(require_user)):
+    uid = owner_id(ctx, user_id)
+    start, end = date_bounds(range, start_date, end_date)
+    query = ctx.db.table("mood_records").select("*").eq("is_deleted", False).eq("user_id", uid)
+    if start:
+        query = query.gte("created_at", start.isoformat())
+    if end:
+        query = query.lt("created_at", end.isoformat())
+    return [normalize_record(row) for row in execute_db(query.order("created_at", desc=True))]
 
 
 @app.get("/api/summary")
-def get_summary(range: str = "7d", user_id: Optional[str] = None):
-    records = get_records(range, user_id)
+def get_summary(range: str = "7d", user_id: Optional[str] = None, ctx: UserContext = Depends(require_user)):
+    owner_id(ctx, user_id)
+    records = get_records(range, ctx.user_id, ctx=ctx)
 
     if not records:
         return {
@@ -548,6 +551,7 @@ def get_summary(range: str = "7d", user_id: Optional[str] = None):
             "happy_moments": [],
             "happy_moments_with_date": [],
             "growth_summary": "还没有足够的记录，多记录几次后我们会帮你看见变化。",
+            "generation_status": "not_requested",
         }
 
     # 按日期把记录分组，算出每天的平均强度和当天最常见的情绪
@@ -582,7 +586,9 @@ def get_summary(range: str = "7d", user_id: Optional[str] = None):
         if r["happy_moment"]
     ][:3]
 
-    growth_summary = call_deepseek(
+    generation_status = "generated"
+    try:
+        growth_summary = call_deepseek(
         [
             {
                 "role": "system",
@@ -601,7 +607,10 @@ def get_summary(range: str = "7d", user_id: Optional[str] = None):
                 "content": f"高频情绪：{top_emotions}\n高频触发场景：{top_scenes}\n记录到的开心时刻：{happy_moments}",
             },
         ]
-    ).strip()
+        ).strip()
+    except Exception:
+        generation_status = "fallback"
+        growth_summary = "统计已加载；文字小结暂时未能生成，请稍后再试。"
 
     return {
         "range": range,
@@ -613,27 +622,31 @@ def get_summary(range: str = "7d", user_id: Optional[str] = None):
         "happy_moments": happy_moments,
         "happy_moments_with_date": happy_moments_with_date,
         "growth_summary": growth_summary,
+        "generation_status": generation_status,
     }
 
 
 def weekly_letter_response(
-    range_value: str, records: list[dict], greeting: str, body: str
+    range_value: str, records: list[dict], greeting: str, body: str, generation_status: str = "generated"
 ) -> dict:
     return {
         "range": range_value,
         "record_count": len(records),
         "letter": f"{greeting}\n\n{body.strip()}",
         "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generation_status": generation_status,
     }
 
 
 @app.get("/api/weekly-letter")
 def get_weekly_letter(
-    user_id: str,
+    user_id: Optional[str] = None,
     user_name: Optional[str] = None,
     range: str = "7d",
+    ctx: UserContext = Depends(require_user),
 ):
-    records = get_records(range, user_id)
+    owner_id(ctx, user_id)
+    records = get_records(range, ctx.user_id, ctx=ctx)
     greeting = build_letter_greeting(user_name)
 
     if not records:
@@ -642,9 +655,10 @@ def get_weekly_letter(
             records,
             greeting,
             "这一周还没有留下可以一起回望的片段。等你想写的时候，我们再慢慢聊。",
+            "not_requested",
         )
 
-    context = build_weekly_letter_context(records)
+    context = build_weekly_letter_context(records[:50])
     weekly_summary = json.dumps(
         {
             "record_count": context["record_count"],
@@ -659,6 +673,7 @@ def get_weekly_letter(
         .replace("{weekly_records}", context["records_text"])
     )
 
+    generation_status = "generated"
     try:
         body = call_deepseek(
             [
@@ -669,77 +684,48 @@ def get_weekly_letter(
                 {"role": "user", "content": prompt},
             ]
         )
-    except Exception as exc:  # noqa: BLE001
-        print(f"[weekly-letter] deepseek error: {exc!r}")
+    except Exception:
+        generation_status = "fallback"
+        logger.warning("weekly_letter_fallback")
         body = (
             "本来想写这封信，好好说说这一周与你有关的那些片段，"
             "但此刻信纸像是被风轻轻翻乱了。"
             "你留下的心情没有被忽略，等我整理好，再认真陪你聊聊。"
         )
 
-    return weekly_letter_response(range, records, greeting, body)
+    return weekly_letter_response(range, records, greeting, body, generation_status)
 
 
 class MomentRequest(BaseModel):
-    user_id: str
-    happy_moment: str
-    scene_category: Optional[str] = None
-    record_id: Optional[str] = None
+    user_id: Optional[str] = Field(default=None, max_length=100)
+    happy_moment: NonBlank
+    scene_category: Optional[ShortText] = None
+    record_id: Optional[str] = Field(default=None, pattern=r"^[1-9][0-9]{0,17}$")
 
 
 @app.post("/api/moments")
-def save_moment(req: MomentRequest):
+def save_moment(req: MomentRequest, ctx: UserContext = Depends(require_user)):
+    uid = owner_id(ctx, req.user_id)
     if req.record_id:
-        try:
-            numeric_id = int(req.record_id)
-        except ValueError:
-            raise HTTPException(status_code=422, detail="record_id 必须是合法的数字")
-
-        # 关联到已有的记录：直接把开心 moment 补进那一条
-        result = (
-            supabase.table("mood_records")
-            .update({"happy_moment": req.happy_moment})
-            .eq("id", numeric_id)
-            .eq("user_id", req.user_id)
-            .execute()
-        )
-        saved_row = result.data[0]
-    else:
-        # 没有关联记录：单独存一条"快速记开心事"记录，标签和强度固定，场景仍需用户选
-        if not req.scene_category:
-            raise HTTPException(
-                status_code=422, detail="单独记开心事时，scene_category 是必填的"
-            )
-
-        insert_result = (
-            supabase.table("mood_records")
-            .insert(
-                {
-                    "user_id": req.user_id,
-                    "mood_text": req.happy_moment,
-                    "emotion_tags": ["开心"],
-                    "intensity": 5,
-                    "scene_category": req.scene_category,
-                    "happy_moment": req.happy_moment,
-                    "is_deleted": False,
-                }
-            )
-            .execute()
-        )
-        saved_row = insert_result.data[0]
-
-    saved_row["record_id"] = str(saved_row["id"])
-    return saved_row
+        rows = execute_db(ctx.db.table("mood_records").update({"happy_moment": req.happy_moment})
+                          .eq("id", int(req.record_id)).eq("user_id", uid).eq("is_deleted", False))
+        if not rows:
+            raise HTTPException(404, "记录不存在")
+        return normalize_record(rows[0])
+    if not req.scene_category:
+        raise HTTPException(422, "单独记开心事时，scene_category 是必填的")
+    return saved_record(execute_db(ctx.db.table("mood_records").insert({
+        "user_id": uid, "mood_text": req.happy_moment, "emotion_tags": ["开心"], "intensity": 5,
+        "scene_category": req.scene_category, "happy_moment": req.happy_moment, "is_deleted": False,
+    })))
 
 
 @app.delete("/api/records/{record_id}")
-def delete_record(record_id: str):
-    try:
-        numeric_id = int(record_id)
-    except ValueError:
-        raise HTTPException(status_code=422, detail="record_id 必须是合法的数字")
-
-    supabase.table("mood_records").update({"is_deleted": True}).eq(
-        "id", numeric_id
-    ).execute()
+def delete_record(record_id: str, ctx: UserContext = Depends(require_user)):
+    if not record_id.isascii() or not record_id.isdigit() or not 0 < int(record_id) < 2**63:
+        raise HTTPException(422, "record_id 必须是合法的正整数")
+    rows = execute_db(ctx.db.table("mood_records").update({"is_deleted": True})
+                      .eq("id", int(record_id)).eq("user_id", ctx.user_id).eq("is_deleted", False))
+    if not rows:
+        raise HTTPException(404, "记录不存在")
     return {"deleted": True, "record_id": record_id}

@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import main
@@ -80,7 +81,7 @@ class WeeklyLetterRouteTest(unittest.TestCase):
         )
 
         result = main.get_weekly_letter(
-            user_id="user-1", user_name="小暖", range="7d"
+            user_id="user-1", user_name="小暖", range="7d", ctx=SimpleNamespace(user_id="user-1")
         )
 
         self.assertEqual(result["range"], "7d")
@@ -88,7 +89,7 @@ class WeeklyLetterRouteTest(unittest.TestCase):
         self.assertTrue(result["letter"].startswith("亲爱的小暖：\n\n"))
         self.assertIn("替你松了一口气", result["letter"])
         self.assertIn("generated_at", result)
-        mock_get_records.assert_called_once_with("7d", "user-1")
+        mock_get_records.assert_called_once_with("7d", "user-1", ctx=SimpleNamespace(user_id="user-1"))
         messages = mock_call_deepseek.call_args.args[0]
         self.assertIn("只写正文", messages[0]["content"])
         self.assertIn("完成了拖延很久的任务", messages[1]["content"])
@@ -99,7 +100,7 @@ class WeeklyLetterRouteTest(unittest.TestCase):
         self, mock_get_records, mock_call_deepseek
     ):
         result = main.get_weekly_letter(
-            user_id="user-1", user_name="", range="7d"
+            user_id="user-1", user_name="", range="7d", ctx=SimpleNamespace(user_id="user-1")
         )
 
         self.assertEqual(result["record_count"], 0)
@@ -124,7 +125,7 @@ class WeeklyLetterRouteTest(unittest.TestCase):
         ]
 
         result = main.get_weekly_letter(
-            user_id="user-1", user_name="小暖", range="7d"
+            user_id="user-1", user_name="小暖", range="7d", ctx=SimpleNamespace(user_id="user-1")
         )
 
         self.assertEqual(result["record_count"], 1)
