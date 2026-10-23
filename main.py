@@ -424,11 +424,11 @@ def analyze(req: AnalyzeRequest, ctx: UserContext = Depends(require_user)):
 
 class SaveRecordRequest(AnalyzeRequest):
     client_request_id: Optional[UUID] = None
-    ai_observed_emotions: list[Tag] = Field(max_length=20)
-    ai_summary: str = Field(max_length=4000)
-    ai_self_care_tips: str = Field(max_length=4000)
-    ai_closing_message: str = Field(max_length=4000)
-    risk_level: RiskLevel
+    ai_observed_emotions: list[Tag] = Field(default_factory=list, max_length=20)
+    ai_summary: str = Field(default="", max_length=4000)
+    ai_self_care_tips: str = Field(default="", max_length=4000)
+    ai_closing_message: str = Field(default="", max_length=4000)
+    risk_level: RiskLevel = "unknown"
 
 
 @app.post("/api/records")
@@ -444,6 +444,26 @@ def save_record(req: SaveRecordRequest, ctx: UserContext = Depends(require_user)
             rows = execute_db(ctx.db.table("mood_records").select("*").eq("user_id", uid).eq("client_request_id", key).limit(1))
         return saved_record(rows)
     return saved_record(execute_db(ctx.db.table("mood_records").insert(record)))
+
+
+@app.post("/api/records/{record_id}/analyze")
+def analyze_saved_record(record_id: int, ctx: UserContext = Depends(require_user)):
+    # Read the durable note, never accept replacement text or another owner's ID.
+    rows = execute_db(ctx.db.table("mood_records").select("*").eq("id", record_id)
+                      .eq("user_id", ctx.user_id).eq("is_deleted", False).limit(1))
+    if not rows:
+        raise HTTPException(404, "记录不存在")
+    req = AnalyzeRequest.model_validate(rows[0])
+    result = analyze(req, ctx)
+    if result["generation_status"] != "generated":
+        return {**result, "record_id": str(record_id)}
+    updates = {key: result[key] for key in (
+        "ai_reply", "ai_observed_emotions", "ai_summary", "ai_self_care_tips",
+        "ai_closing_message", "risk_level")}
+    # Persist before returning, independently of browser navigation or animation.
+    saved_record(execute_db(ctx.db.table("mood_records").update(updates).eq("id", record_id)
+                            .eq("user_id", ctx.user_id).eq("is_deleted", False)))
+    return {**result, "record_id": str(record_id)}
 
 
 @app.get("/")
