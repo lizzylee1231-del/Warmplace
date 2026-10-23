@@ -34,7 +34,7 @@ class AuthenticationTest(unittest.TestCase):
         self.client = TestClient(main.app, raise_server_exceptions=False)
 
     def test_all_private_routes_reject_missing_identity(self):
-        cases = [("GET", "/api/records", None), ("GET", "/api/summary", None),
+        cases = [("GET", "/api/records", None), ("GET", "/api/records/42", None), ("GET", "/api/summary", None),
                  ("GET", "/api/weekly-letter?user_id=" + USER, None),
                  ("POST", "/api/records", PAYLOAD), ("POST", "/api/ai/analyze", PAYLOAD),
                  ("POST", "/api/records/42/analyze", None),
@@ -140,6 +140,36 @@ class PrivateApiTest(unittest.TestCase):
         self.query.eq.assert_any_call("user_id", USER)
         self.query.eq.assert_any_call("is_deleted", False)
         self.query.insert.assert_not_called()
+
+    def test_reply_can_be_loaded_by_record_id_without_generating_again(self):
+        self.query.execute.return_value.data = [{**PAYLOAD, "id": 42, "ai_reply": AI["ai_reply"]}]
+        with patch.object(main, "call_deepseek") as generate:
+            response = self.client.get("/api/records/42")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["record_id"], "42")
+        self.assertEqual(response.json()["ai_reply"], AI["ai_reply"])
+        self.query.eq.assert_any_call("id", 42)
+        self.query.eq.assert_any_call("user_id", USER)
+        self.query.eq.assert_any_call("is_deleted", False)
+        generate.assert_not_called()
+        self.query.update.assert_not_called()
+
+    def test_loading_missing_foreign_or_deleted_record_is_404(self):
+        response = self.client.get("/api/records/42")
+        self.assertEqual(response.status_code, 404)
+        self.query.eq.assert_any_call("user_id", USER)
+        self.query.eq.assert_any_call("is_deleted", False)
+
+    def test_completed_reply_is_reused_on_analysis_retry(self):
+        self.query.execute.return_value.data = [{**PAYLOAD, "id": 42, "ai_reply": AI["ai_reply"]}]
+        with patch.object(main, "analyze") as generate:
+            response = self.client.post("/api/records/42/analyze")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["ai_reply"], AI["ai_reply"])
+        self.assertEqual(response.json()["generation_status"], "generated")
+        self.assertEqual(response.json()["record_id"], "42")
+        generate.assert_not_called()
+        self.query.update.assert_not_called()
 
     def test_analysis_failure_leaves_original_note_untouched(self):
         self.query.execute.return_value.data = [{**PAYLOAD, "id": 42}]

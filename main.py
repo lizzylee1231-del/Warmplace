@@ -446,14 +446,25 @@ def save_record(req: SaveRecordRequest, ctx: UserContext = Depends(require_user)
     return saved_record(execute_db(ctx.db.table("mood_records").insert(record)))
 
 
-@app.post("/api/records/{record_id}/analyze")
-def analyze_saved_record(record_id: int, ctx: UserContext = Depends(require_user)):
-    # Read the durable note, never accept replacement text or another owner's ID.
+@app.get("/api/records/{record_id}")
+def get_record(record_id: int, ctx: UserContext = Depends(require_user)):
     rows = execute_db(ctx.db.table("mood_records").select("*").eq("id", record_id)
                       .eq("user_id", ctx.user_id).eq("is_deleted", False).limit(1))
     if not rows:
         raise HTTPException(404, "记录不存在")
-    req = AnalyzeRequest.model_validate(rows[0])
+    return normalize_record(rows[0])
+
+
+@app.post("/api/records/{record_id}/analyze")
+def analyze_saved_record(record_id: int, ctx: UserContext = Depends(require_user)):
+    # Read the durable note, never accept replacement text or another owner's ID.
+    record = get_record(record_id, ctx)
+    if (record.get("ai_reply") or "").strip():
+        return {**{key: record.get(key) for key in (
+            "ai_reply", "ai_observed_emotions", "ai_summary", "ai_self_care_tips",
+            "ai_closing_message", "risk_level")},
+            "record_id": str(record_id), "generation_status": "generated"}
+    req = AnalyzeRequest.model_validate(record)
     result = analyze(req, ctx)
     if result["generation_status"] != "generated":
         return {**result, "record_id": str(record_id)}
