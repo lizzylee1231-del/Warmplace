@@ -37,6 +37,7 @@ class AuthenticationTest(unittest.TestCase):
         cases = [("GET", "/api/records", None), ("GET", "/api/summary", None),
                  ("GET", "/api/weekly-letter?user_id=" + USER, None),
                  ("POST", "/api/records", PAYLOAD), ("POST", "/api/ai/analyze", PAYLOAD),
+                 ("POST", "/api/records/42/analyze", None),
                  ("POST", "/api/moments", {"user_id": USER, "happy_moment": "test", "scene_category": "test"}),
                  ("DELETE", "/api/records/42", None)]
         for method, url, body in cases:
@@ -111,6 +112,64 @@ class PrivateApiTest(unittest.TestCase):
         self.assertEqual(response.json()["record_id"], "42")
         self.query.upsert.assert_called_once()
         self.query.eq.assert_any_call("client_request_id", key)
+
+    def test_note_can_be_saved_before_ai_is_available(self):
+        note = {k: PAYLOAD[k] for k in ("mood_text", "emotion_tags", "intensity", "scene_category")}
+        self.query.execute.return_value.data = [{**note, "id": 42}]
+        with patch.object(main, "call_deepseek") as generate:
+            response = self.client.post("/api/records", json=note)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["record_id"], "42")
+        generate.assert_not_called()
+        inserted = self.query.insert.call_args.args[0]
+        self.assertEqual(inserted["mood_text"], note["mood_text"])
+        self.assertEqual(inserted["risk_level"], "unknown")
+
+    def test_analysis_updates_saved_record_before_returning(self):
+        row = {**PAYLOAD, "id": 42}
+        self.query.execute.side_effect = [SimpleNamespace(data=[row]), SimpleNamespace(data=[row])]
+        with patch.object(main, "analyze", return_value={**AI, "generation_status": "generated"}) as generate:
+            response = self.client.post("/api/records/42/analyze")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["record_id"], "42")
+        self.assertEqual(generate.call_args.args[0].mood_text, row["mood_text"])
+        update = self.query.update.call_args.args[0]
+        self.assertEqual(update["ai_reply"], AI["ai_reply"])
+        self.assertNotIn("mood_text", update)
+        self.query.eq.assert_any_call("id", 42)
+        self.query.eq.assert_any_call("user_id", USER)
+        self.query.eq.assert_any_call("is_deleted", False)
+        self.query.insert.assert_not_called()
+
+    def test_analysis_failure_leaves_original_note_untouched(self):
+        self.query.execute.return_value.data = [{**PAYLOAD, "id": 42}]
+        with patch.object(main, "analyze", return_value={"generation_status": "fallback"}):
+            response = self.client.post("/api/records/42/analyze")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["generation_status"], "fallback")
+        self.query.update.assert_not_called()
+        self.query.insert.assert_not_called()
+
+    def test_analysis_rejects_missing_or_other_users_record(self):
+        with patch.object(main, "analyze") as generate:
+            response = self.client.post("/api/records/42/analyze")
+        self.assertEqual(response.status_code, 404)
+        self.query.eq.assert_any_call("user_id", USER)
+        generate.assert_not_called()
+
+    def test_ai_update_failure_is_not_reported_as_persisted(self):
+        self.query.execute.side_effect = [SimpleNamespace(data=[{**PAYLOAD, "id": 42}]), RuntimeError("database down")]
+        with patch.object(main, "analyze", return_value={**AI, "generation_status": "generated"}):
+            response = self.client.post("/api/records/42/analyze")
+        self.assertEqual(response.status_code, 503)
+        self.query.insert.assert_not_called()
+
+    def test_deleted_record_during_generation_is_not_updated(self):
+        self.query.execute.side_effect = [SimpleNamespace(data=[{**PAYLOAD, "id": 42}]), SimpleNamespace(data=[])]
+        with patch.object(main, "analyze", return_value={**AI, "generation_status": "generated"}):
+            response = self.client.post("/api/records/42/analyze")
+        self.assertEqual(response.status_code, 503)
+        self.query.eq.assert_any_call("is_deleted", False)
 
     def test_weekly_provider_failure_is_identified_as_fallback(self):
         row = {**PAYLOAD, "id": 42, "created_at": "2026-10-23T03:00:00Z"}
